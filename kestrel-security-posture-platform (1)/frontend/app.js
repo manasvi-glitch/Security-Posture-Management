@@ -700,8 +700,8 @@ function renderReports() {
           <div class="result" id="importJsonResult"></div>
         </div>
         <div class="prose">
-          <h4 style="font-size:16px; font-weight:600; color:var(--ink)">Nessus or OpenVAS CSV</h4>
-          <p>Upload an export with columns like <span class="mono">Host</span>, <span class="mono">Name</span>, <span class="mono">Risk</span>, <span class="mono">Synopsis</span>, <span class="mono">CVE</span>.</p>
+          <h4 style="font-size:16px; font-weight:600; color:var(--ink)">Scanner or CVE/CWE catalog CSV</h4>
+          <p>Upload Nessus/OpenVAS exports or CVE/CWE catalogs with CVE-ID, CVSS, SEVERITY, DESCRIPTION and CWE-ID columns. Large catalogs are streamed and imported in batches.</p>
           <input type="file" id="importCsvFile" accept=".csv">
           <div style="margin-top:12px"><button class="btn" id="importCsvBtn">Import CSV</button></div>
           <div class="result" id="importCsvResult"></div>
