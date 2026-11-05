@@ -1,0 +1,49 @@
+[
+  {
+    "id": "KS-1001",
+    "host": "vpn-gateway-03",
+    "ip": "10.60.0.3",
+    "internet_facing": true,
+    "finding": "Outdated OpenVPN version with known remote code execution CVE",
+    "severity": "critical",
+    "description": "CVE-2024-14023: the OpenVPN service is running a version with a publicly known, actively exploited remote code execution vulnerability.",
+    "cve": "CVE-2024-14023"
+  },
+  {
+    "id": "KS-1002",
+    "host": "vpn-gateway-03",
+    "ip": "10.60.0.3",
+    "internet_facing": true,
+    "finding": "Weak password policy allows dictionary-guessable passwords",
+    "severity": "medium",
+    "description": "The authentication service does not enforce minimum password complexity, allowing common dictionary words."
+  },
+  {
+    "id": "KS-1003",
+    "host": "backup-nas-02",
+    "ip": "10.30.9.4",
+    "internet_facing": false,
+    "finding": "SMBv1 protocol enabled, vulnerable to known worm exploits",
+    "severity": "high",
+    "description": "SMBv1 is enabled and reachable from the internal network, exposing the host to EternalBlue-class exploits.",
+    "cve": "CVE-2017-0144"
+  },
+  {
+    "id": "KS-1004",
+    "host": "billing-api",
+    "ip": null,
+    "internet_facing": true,
+    "finding": "Unrestricted CORS policy on customer billing endpoint",
+    "severity": "low",
+    "description": "The Access-Control-Allow-Origin header is set to '*' on an endpoint that returns account data."
+  },
+  {
+    "id": "KS-1005",
+    "host": "print-server-hq",
+    "ip": "10.10.3.40",
+    "internet_facing": false,
+    "finding": "Default administrator credentials still in use",
+    "severity": "high",
+    "description": "The management interface accepts the vendor default username and password combination."
+  }
+]

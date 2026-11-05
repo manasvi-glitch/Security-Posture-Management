@@ -1,0 +1,6 @@
+Plugin ID,CVE,Risk,Host,Protocol,Port,Name,Synopsis
+51192,CVE-2010-4478,High,edge-router-07,tcp,22,SSH Weak Algorithms Supported,The remote SSH server is configured to allow weak key exchange algorithms.
+84502,,Medium,edge-router-07,tcp,443,SSL Certificate Cannot Be Trusted,The SSL certificate for this service is signed by an untrusted certificate authority.
+78479,CVE-2014-3566,High,legacy-file-share,tcp,443,SSL POODLE Vulnerability,The remote host is affected by the POODLE vulnerability due to SSLv3 support.
+104631,,Low,legacy-file-share,tcp,139,SMB Signing Not Required,Signing is not required on the remote SMB server, allowing man-in-the-middle attacks.
+57608,CVE-2011-3389,Medium,internal-wiki,tcp,443,SSL/TLS BEAST Vulnerability,The remote host is affected by the BEAST attack against TLS/SSLv3.

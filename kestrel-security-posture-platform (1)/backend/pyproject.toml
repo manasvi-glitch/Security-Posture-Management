@@ -1,0 +1,19 @@
+[project]
+name = "kestrel-security-posture-platform"
+version = "0.1.0"
+description = "Security Posture Management Platform (FastAPI)"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "SQLAlchemy>=2.0.35",
+    "pydantic[email]>=2.9",
+    "python-jose[cryptography]>=3.3.0",
+    "bcrypt>=4.2.0",
+    "python-multipart>=0.0.9",
+    "psycopg2-binary>=2.9",
+]
+
+# Tells Vercel where the FastAPI instance lives (module path : variable).
+[tool.vercel]
+entrypoint = "app.main:app"
