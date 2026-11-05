@@ -317,7 +317,9 @@ async function renderDashboard() {
 // FINDINGS
 // ============================================================
 let findingsFilters = { severity: "", category: "", status: "", q: "" };
-let findingsCache = { findings: [], assetNames: {} };
+let findingsCache = { findings: [], assetNames: {}, hasMore: false };
+let findingsPage = 0;
+const FINDINGS_PAGE_SIZE = 100;
 
 async function renderFindings() {
   main().innerHTML = `<div class="fade">
@@ -339,7 +341,7 @@ async function renderFindings() {
   ["severity", "category", "status"].forEach(k => {
     const el = document.getElementById("f_" + k);
     el.value = findingsFilters[k];
-    el.addEventListener("change", () => { findingsFilters[k] = el.value; loadFindings(); });
+    el.addEventListener("change", () => { findingsFilters[k] = el.value; findingsPage = 0; loadFindings(); });
   });
   const q = document.getElementById("f_q");
   q.value = findingsFilters.q;
@@ -352,14 +354,22 @@ async function loadFindings() {
   const params = new URLSearchParams();
   ["severity", "category", "status"].forEach(k => { if (findingsFilters[k]) params.set(k, findingsFilters[k]); });
   try {
-    const [findings, assets] = await Promise.all([api("/api/findings?" + params.toString()), api("/api/assets")]);
-    findingsCache.findings = findings;
+    const [findings, assets] = await Promise.all([api("/api/findings?" + params.toString() + "&limit=" + (FINDINGS_PAGE_SIZE + 1) + "&offset=" + (findingsPage * FINDINGS_PAGE_SIZE)), api("/api/assets")]);
+    findingsCache.hasMore = findings.length > FINDINGS_PAGE_SIZE;
+    findingsCache.findings = findings.slice(0, FINDINGS_PAGE_SIZE);
     findingsCache.assetNames = Object.fromEntries(assets.map(a => [a.id, a.name]));
   } catch (e) {
     document.getElementById("findingsTable").innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`;
     return;
   }
   drawFindingsTable();
+}
+
+function bindFindingsPaging(host, count) {
+  const prev = host.querySelector("#findingsPrev");
+  const next = host.querySelector("#findingsNext");
+  if (prev) prev.addEventListener("click", () => { if (findingsPage > 0) { findingsPage--; loadFindings(); } });
+  if (next) next.addEventListener("click", () => { if (findingsCache.hasMore) { findingsPage++; loadFindings(); } });
 }
 
 function drawFindingsTable() {
@@ -369,7 +379,7 @@ function drawFindingsTable() {
   const rows = findingsCache.findings.filter(f => !q ||
     f.title.toLowerCase().includes(q) || (findingsCache.assetNames[f.asset_id] || "").toLowerCase().includes(q));
 
-  if (!rows.length) { host.innerHTML = `<div class="empty">Nothing matches those filters.</div>`; return; }
+  if (!rows.length) { host.innerHTML = `<div class="empty">Nothing matches those filters on this page.</div><div class="row" style="justify-content:space-between;margin-top:12px"><button class="btn quiet" id="findingsPrev" ${findingsPage === 0 ? "disabled" : ""}>Previous</button><span class="muted">Page ${findingsPage + 1}</span><button class="btn quiet" id="findingsNext" disabled>Next</button></div>`; bindFindingsPaging(host, 0); return; }
   host.innerHTML = `<table class="data"><thead><tr>
       <th>Severity</th><th>Finding</th><th>Area</th><th class="r">Risk</th><th>Status</th><th>Age</th><th></th>
     </tr></thead><tbody>${rows.map(f => `
@@ -383,6 +393,8 @@ function drawFindingsTable() {
         <td class="r"><button class="link" data-open-finding="${f.id}">Open</button></td>
       </tr>`).join("")}</tbody></table>`;
   host.querySelectorAll("[data-open-finding]").forEach(b => b.addEventListener("click", () => openFindingDetail(b.dataset.openFinding)));
+  host.insertAdjacentHTML("beforeend", `<div class="row" style="justify-content:space-between;margin-top:12px"><button class="btn quiet" id="findingsPrev" ${findingsPage === 0 ? "disabled" : ""}>Previous</button><span class="muted">Page ${findingsPage + 1} · ${rows.length} shown</span><button class="btn quiet" id="findingsNext" ${!findingsCache.hasMore ? "disabled" : ""}>Next</button></div>`);
+  bindFindingsPaging(host, rows.length);
 }
 
 async function openFindingForm() {
@@ -552,6 +564,120 @@ function openAssetForm() {
 // ============================================================
 // IMPORT & EXPORT
 // ============================================================
+// Stream a CSV file in the browser so large catalogs do not need to be loaded
+// into memory or uploaded as one oversized request.
+async function processCatalogCsv(file, statusNode) {
+  const batchSize = 2000;
+  let header = null, row = [], field = "", inQuotes = false, quotePending = false;
+  let batch = [], imported = 0, skipped = 0, errors = 0, processed = 0, bytesRead = 0;
+  const norm = value => String(value || "").replace(/^\uFEFF/, "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  const headers = {};
+  const get = (record, names) => {
+    for (const name of names) {
+      const key = headers[norm(name)];
+      if (key !== undefined && record[key] != null && String(record[key]).trim() !== "") return String(record[key]).trim();
+    }
+    return "";
+  };
+  const categoryFor = (cwe, description) => {
+    const n = Number((String(cwe).match(/\d+/) || [])[0]);
+    const d = description.toLowerCase();
+    if ([287,306,798,522,521,862,863,269,284,295,294,640,384,290].includes(n) || /authentication|password|credential|privilege escalation|access control|unauthori[sz]ed access/.test(d)) return "authentication";
+    if ([79,89,352,22,434,918,94,78,611,601,502,77,917,98,74].includes(n) || /cross.site scripting|sql injection|web application|http request|command injection/.test(d)) return "application";
+    if ([119,120,121,122,125,416,787,190,476,400,401,134,20].includes(n) || /buffer overflow|out.of.bounds|memory corruption/.test(d)) return "configuration";
+    if (/tcp|udp|dns|network|router|firewall|remote attacker|nfs|ssh|tls|ssl|ip protocol/.test(d)) return "network";
+    if (/outdated|end.of.life|unsupported version|missing patch|security update/.test(d)) return "patch_management";
+    return "configuration";
+  };
+  const parseRecord = async record => {
+    if (!header) {
+      header = record.map(v => v.trim().replace(/^\uFEFF/, ""));
+      header.forEach((name, i) => headers[norm(name)] = i);
+      const cveCol = ["cveid","cve","cveidentifier"].some(k => headers[k] !== undefined);
+      const descCol = ["description","shortdescription","summary"].some(k => headers[k] !== undefined);
+      if (!cveCol || !descCol) throw new Error("This does not look like a CVE/CWE catalog CSV. Expected CVE-ID and DESCRIPTION columns.");
+      return;
+    }
+    if (record.length === 1 && !record[0].trim()) return;
+    processed++;
+    const cve = get(record, ["CVE-ID","CVE ID","CVE"]);
+    const description = get(record, ["DESCRIPTION","SHORT DESCRIPTION","SUMMARY"]);
+    if (!cve || !/^CVE-\d{4}-\d+$/i.test(cve) || !description) { errors++; return; }
+    let score = null;
+    for (const col of ["CVSS-V4","CVSS-V3","CVSS-V2","CVSS","CVSS Score","Base Score"]) {
+      const raw = get(record, [col]);
+      if (/^(?:10(?:\.0)?|[0-9](?:\.\d+)?)$/.test(raw)) { score = Number(raw); break; }
+    }
+    let severity = get(record, ["SEVERITY","CVSS Severity","Base Severity"]).toLowerCase();
+    if (!["critical","high","medium","low"].includes(severity)) {
+      severity = score !== null ? (score >= 9 ? "critical" : score >= 7 ? "high" : score >= 4 ? "medium" : "low") : "medium";
+    }
+    const titleText = description.split(/(?<=[.!?])\s/)[0].slice(0, 420);
+    batch.push({
+      cve_id: cve,
+      external_id: get(record, ["ID","Plugin ID"]) || cve,
+      title: (cve + ": " + titleText).slice(0, 500),
+      description: description.slice(0, 10000),
+      severity,
+      category: categoryFor(get(record, ["CWE-ID","CWE ID","CWE"]), description)
+    });
+    if (batch.length >= batchSize) await sendBatch();
+  };
+  const sendBatch = async () => {
+    if (!batch.length) return;
+    const payload = batch;
+    batch = [];
+    const result = await api("/api/findings/import/catalog-batch", {method:"POST", body:payload});
+    imported += result.findings_created || 0;
+    skipped += result.findings_skipped || 0;
+    errors += (result.errors || []).length;
+    statusNode.textContent = "Processed " + processed.toLocaleString() + " rows · imported " + imported.toLocaleString() + " · skipped " + skipped.toLocaleString() + " · errors " + errors.toLocaleString();
+  };
+  const reader = file.stream().getReader();
+  const decoder = new TextDecoder("utf-8");
+  const consume = async chunk => {
+    for (let i = 0; i < chunk.length; i++) {
+      const ch = chunk[i];
+      if (quotePending) {
+        quotePending = false;
+        if (ch === '"') { field += '"'; continue; }
+        inQuotes = false;
+      }
+      if (inQuotes) {
+        if (ch === '"') quotePending = true;
+        else field += ch;
+      } else if (ch === '"' && field.length === 0) {
+        inQuotes = true;
+      } else if (ch === ",") {
+        row.push(field); field = "";
+      } else if (ch === "\n") {
+        row.push(field); field = "";
+        await parseRecord(row); row = [];
+      } else if (ch !== "\r") {
+        field += ch;
+      }
+    }
+  };
+  try {
+    while (true) {
+      const {value, done} = await reader.read();
+      if (done) break;
+      bytesRead += value.byteLength;
+      await consume(decoder.decode(value, {stream:true}));
+      statusNode.textContent = "Reading CSV… " + Math.min(99, Math.round(bytesRead / file.size * 100)) + "% · " + processed.toLocaleString() + " rows";
+    }
+    const tail = decoder.decode();
+    if (tail) await consume(tail);
+    if (quotePending) { quotePending = false; inQuotes = false; }
+    if (field.length || row.length) { row.push(field); await parseRecord(row); }
+    await sendBatch();
+  } catch (error) {
+    try { await reader.cancel(); } catch (_) {}
+    throw error;
+  }
+  return {processed, imported, skipped, errors};
+}
+
 function renderReports() {
   main().innerHTML = `<div class="fade">
     <div class="page-head"><h1>Import &amp; export</h1><div class="sub">Bring in scanner results, or take the findings register out.</div></div>
@@ -574,8 +700,8 @@ function renderReports() {
           <div class="result" id="importJsonResult"></div>
         </div>
         <div class="prose">
-          <h4 style="font-size:16px; font-weight:600; color:var(--ink)">Nessus or OpenVAS CSV</h4>
-          <p>Upload an export with columns like <span class="mono">Host</span>, <span class="mono">Name</span>, <span class="mono">Risk</span>, <span class="mono">Synopsis</span>, <span class="mono">CVE</span>.</p>
+          <h4 style="font-size:16px; font-weight:600; color:var(--ink)">Scanner or CVE/CWE catalog CSV</h4>
+          <p>Upload Nessus/OpenVAS exports or CVE/CWE catalogs with CVE-ID, CVSS, SEVERITY, DESCRIPTION and CWE-ID columns. Large catalogs are streamed and imported in batches.</p>
           <input type="file" id="importCsvFile" accept=".csv">
           <div style="margin-top:12px"><button class="btn" id="importCsvBtn">Import CSV</button></div>
           <div class="result" id="importCsvResult"></div>
@@ -604,10 +730,39 @@ function renderReports() {
   });
   document.getElementById("importCsvBtn").addEventListener("click", async () => {
     const input = document.getElementById("importCsvFile");
+    const button = document.getElementById("importCsvBtn");
+    const resultNode = document.getElementById("importCsvResult");
     if (!input.files.length) { toast("Choose a CSV file first.", true); return; }
-    const form = new FormData(); form.append("file", input.files[0]);
-    try { const r = await api("/api/findings/import/nessus-csv", { method: "POST", body: form, isForm: true }); document.getElementById("importCsvResult").textContent = summarize(r); toast("Import finished."); }
-    catch (e) { toast(e.message, true); }
+    const file = input.files[0];
+    button.disabled = true;
+    button.textContent = "Processing…";
+    resultNode.textContent = "Checking CSV format…";
+    try {
+      const sample = await file.slice(0, 8192).text();
+      const header = (sample.split(/\r?\n/, 1)[0] || "").replace(/^\uFEFF/, "").toLowerCase().replace(/[^a-z0-9,]/g, "");
+      let result;
+      if (header.includes("cveid") && header.includes("description")) {
+        resultNode.textContent = "CVE/CWE catalog detected. Streaming and importing in batches…";
+        result = await processCatalogCsv(file, resultNode);
+        resultNode.textContent = `Completed: ${result.imported.toLocaleString()} findings imported; ${result.skipped.toLocaleString()} duplicates skipped; ${result.errors.toLocaleString()} rows skipped due to invalid data.`;
+        toast("Catalog import finished.");
+      } else {
+        resultNode.textContent = "Uploading scanner CSV…";
+        const form = new FormData(); form.append("file", file);
+        const r = await api("/api/findings/import/nessus-csv", { method: "POST", body: form, isForm: true });
+        resultNode.textContent = summarize(r);
+        toast("CSV import finished.");
+      }
+      findingsPage = 0;
+      findingsFilters = {severity:"", category:"", status:"", q:""};
+      navigate("findings");
+    } catch (e) {
+      resultNode.textContent = "Import failed: " + e.message;
+      toast(e.message, true);
+    } finally {
+      button.disabled = false;
+      button.textContent = "Import CSV";
+    }
   });
 }
 

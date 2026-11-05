@@ -1,38 +1,18 @@
 #!/usr/bin/env python3
-"""
-Convert a vulnerability CATALOG csv into the Nessus-style CSV that the
-platform's "Import CSV" page accepts.
+"""Convert vulnerability-catalog CSV files into the platform's Nessus-style import CSV.
 
-Works with:
-  * CVE & CWE datasets (columns like ID, CVE-ID, CVSS-V4, CVSS-V3, CVSS-V2,
-    SEVERITY, DESCRIPTION, CWE-ID)
-  * the CISA Known Exploited Vulnerabilities csv (cveID, vendorProject,
-    product, vulnerabilityName, shortDescription, ...)
+This creates DEMO findings and synthetic hosts: a vulnerability catalog does not
+identify which machines in your environment are affected.
 
-A catalog says which vulnerabilities EXIST, not which of your machines have
-them, so this script invents the hosts. The output is demo data, not a scan.
+Supported inputs include CVE/CWE catalogs and the CISA KEV catalog. Headers are
+matched case-insensitively after punctuation/spacing is removed. Comma, semicolon,
+tab and pipe-delimited files are supported.
 
-Examples:
-    python catalog_to_scan.py cve_cwe.csv scan_import.csv --since-year 2020 --min-severity HIGH --limit 80
-    python catalog_to_scan.py known_exploited_vulnerabilities.csv scan_import.csv
+Example:
+  python catalog_to_scan.py cisa_kev.csv scan_import.csv --since-year 2020 --min-severity HIGH --limit 80
 
-Options:
-    --limit N            rows to convert (default 60), sampled at random
-    --since-year YYYY    only CVEs from this year on (recommended: 2020)
-    --min-severity S     LOW | MEDIUM | HIGH | CRITICAL
-    --seed N             make the random sample repeatable (default 7)
-    --hosts-per-group N  size of the invented host pool (default 3)
-
-Column names are matched ignoring case, hyphens, underscores and spaces,
-so "CVE-ID", "cve_id" and "cveID" are all the same column.
-
-Risk comes from, in order: the newest CVSS score present (v4, then v3, then
-v2; the text "None" counts as missing) -> a severity column -> for CISA KEV
-files, ransomware use "Known" = Critical, otherwise High.
-
-Hosts: if the file has a product column, one host per product. Otherwise
-each CVE goes to a host chosen from its CWE family (web apps, auth/VPN
-gateways, memory-safety bugs on servers, everything else on generic servers).
+Output columns match the backend importer:
+  Plugin ID, CVE, Risk, Host, Protocol, Port, Name, Synopsis
 """
 import argparse
 import csv
@@ -41,21 +21,22 @@ import re
 import sys
 from collections import defaultdict
 
-# Aliases are compared after stripping everything but letters and digits.
 ALIASES = {
-    "cve": ["cveid", "cve"],
-    "vendor": ["vendorproject", "vendor"],
-    "product": ["product"],
-    "name": ["vulnerabilityname", "name", "title"],
-    "description": ["shortdescription", "description", "summary"],
+    "cve": ["cveid", "cve", "cveidentifier", "cveids"],
+    "vendor": ["vendorproject", "vendor", "vendorname"],
+    "product": ["product", "productname"],
+    "name": ["vulnerabilityname", "vulnerability", "name", "title", "finding"],
+    "description": ["shortdescription", "description", "summary", "synopsis"],
     "ransomware": ["knownransomwarecampaignuse"],
-    "cvss": ["cvssv4", "cvssv3", "cvssv31", "cvssv2", "cvss", "cvssscore", "basescore"],  # priority order
-    "severity": ["severity", "cvssseverity"],
+    "severity": ["severity", "cvssseverity", "baseseverity", "risk"],
     "cwe": ["cweid", "cwes", "cwe"],
 }
 
+CVSS_ALIASES = [
+    "cvssv4", "cvssv40", "cvssv31", "cvssv3", "cvssv2",
+    "cvss", "cvssscore", "basescore", "cvssbasescore",
+]
 SEVERITY_RANK = {"LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
-
 CWE_GROUPS = {
     "web": ({79, 89, 352, 22, 434, 918, 94, 78, 611, 601, 502, 77, 917, 98, 74},
             ["portal", "web-app", "api-gateway", "cms"],
@@ -67,33 +48,54 @@ CWE_GROUPS = {
                ["app-server", "db-server", "file-server", "edge-router"],
                "Memory-safety or input-handling flaw. Apply the vendor update"),
 }
-OTHER = (["srv"], "Software weakness. Apply the vendor update")
+OTHER = ["srv"], "Software weakness. Apply the vendor update"
 
 
-def norm(col):
-    return re.sub(r"[^a-z0-9]", "", col.lower())
+def norm(value):
+    return re.sub(r"[^a-z0-9]", "", str(value).strip().lower())
+
+
+def read_catalog(path):
+    """Read common CSV dialects and tolerate a UTF-8 BOM."""
+    with open(path, "r", newline="", encoding="utf-8-sig") as handle:
+        sample = handle.read(8192)
+        handle.seek(0)
+        try:
+            dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
+        except csv.Error:
+            dialect = csv.excel
+        reader = csv.DictReader(handle, dialect=dialect)
+        if not reader.fieldnames:
+            raise ValueError("The input file is empty or has no header row.")
+        reader.fieldnames = [str(name or "").strip().lstrip("\ufeff") for name in reader.fieldnames]
+        rows = list(reader)
+        return reader.fieldnames, rows
 
 
 def find_columns(fieldnames):
-    by_norm = {norm(c): c for c in fieldnames}
+    by_norm = {norm(name): name for name in fieldnames}
     cols = {}
     for key, aliases in ALIASES.items():
         cols[key] = next((by_norm[a] for a in aliases if a in by_norm), None)
-    # all matching CVSS columns, newest generation first
-    cols["cvss_all"] = [by_norm[a] for a in ALIASES["cvss"] if a in by_norm]
+    cols["cvss_all"] = [by_norm[a] for a in CVSS_ALIASES if a in by_norm]
     return cols
 
 
 def get(row, col):
-    return (row.get(col) or "").strip() if col else ""
+    value = row.get(col) if col else ""
+    return str(value or "").strip()
 
 
 def best_score(row, cols):
     for col in cols["cvss_all"]:
         raw = get(row, col)
-        if raw and raw.lower() not in ("none", "null", "nan", "n/a"):
+        if raw and raw.lower() not in ("none", "null", "nan", "n/a", "na"):
+            # Only accept a plain numeric score. A CVSS vector contains
+            # version numbers (for example, CVSS:3.1) that are not scores.
             try:
-                return float(raw)
+                score = float(raw)
+                if 0 <= score <= 10:
+                    return score
             except ValueError:
                 continue
     return None
@@ -103,115 +105,139 @@ def risk_for(row, cols):
     score = best_score(row, cols)
     if score is not None:
         return "Critical" if score >= 9 else "High" if score >= 7 else "Medium" if score >= 4 else "Low"
-    sev = get(row, cols["severity"]).capitalize()
-    if sev in ("Critical", "High", "Medium", "Low"):
-        return sev
+    severity = get(row, cols["severity"]).strip().upper()
+    severity = {"MODERATE": "MEDIUM", "INFORMATIONAL": "LOW", "INFO": "LOW"}.get(severity, severity)
+    if severity in SEVERITY_RANK:
+        return severity.title()
     if get(row, cols["ransomware"]).lower() == "known":
         return "Critical"
     return "High"
 
 
 def cve_year(cve):
-    m = re.match(r"CVE-(\d{4})-", cve, re.I)
-    return int(m.group(1)) if m else None
+    match = re.search(r"CVE-(\d{4})-", cve or "", re.I)
+    return int(match.group(1)) if match else None
 
 
-def first_cwe(text):
-    m = re.search(r"CWE-(\d+)", text or "", re.I)
-    return int(m.group(1)) if m else None
+def first_cwe(value):
+    match = re.search(r"CWE-(\d+)", value or "", re.I)
+    if match:
+        return int(match.group(1))
+    # Some catalogs store a bare CWE number.
+    match = re.search(r"(?<!\d)(\d{1,5})(?!\d)", value or "")
+    return int(match.group(1)) if match else None
 
 
 def group_for(cwe_num):
-    for name, (nums, prefixes, hint) in CWE_GROUPS.items():
-        if cwe_num in nums:
+    for name, (numbers, prefixes, hint) in CWE_GROUPS.items():
+        if cwe_num in numbers:
             return name, prefixes, hint
     return "other", OTHER[0], OTHER[1]
 
 
-def slug(text):
-    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-") or "unknown"
+def slug(value):
+    return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-") or "unknown"
 
 
-def short_title(cve, desc):
-    sentence = re.split(r"(?<=[.!?])\s", desc.strip(), maxsplit=1)[0] if desc else ""
+def short_title(cve, description):
+    sentence = re.split(r"(?<=[.!?])\s", description.strip(), maxsplit=1)[0] if description else ""
     sentence = sentence.rstrip(".")
     if len(sentence) > 110:
         sentence = sentence[:107].rsplit(" ", 1)[0] + "..."
-    # The importer treats the text "cve-" as a patching signal, so the ID is written
-    # "CVE 2025-1001" in titles. The real ID still goes in the CVE column. Keeping
-    # it in the title also keeps titles unique (the importer skips duplicate titles).
     tag = cve.replace("CVE-", "CVE ", 1)
-    return f"{sentence} [{tag}]" if sentence else cve
+    return f"{sentence} [{tag}]" if sentence and cve else sentence or cve or "Catalog vulnerability"
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("input")
-    ap.add_argument("output")
-    ap.add_argument("--limit", type=int, default=60)
-    ap.add_argument("--since-year", type=int)
-    ap.add_argument("--min-severity", choices=list(SEVERITY_RANK), type=str.upper)
-    ap.add_argument("--seed", type=int, default=7)
-    ap.add_argument("--hosts-per-group", type=int, default=3)
-    args = ap.parse_args()
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("input", help="Source vulnerability catalog CSV")
+    parser.add_argument("output", help="CSV file to create for platform import")
+    parser.add_argument("--limit", type=int, default=60, help="Maximum findings to convert (default: 60)")
+    parser.add_argument("--since-year", type=int, help="Only include CVEs from this year onward")
+    parser.add_argument("--min-severity", choices=list(SEVERITY_RANK), type=str.upper,
+                        help="Minimum severity: LOW, MEDIUM, HIGH or CRITICAL")
+    parser.add_argument("--seed", type=int, default=7, help="Repeatable sampling seed (default: 7)")
+    parser.add_argument("--hosts-per-group", type=int, default=3, help="Synthetic hosts per CWE group (default: 3)")
+    args = parser.parse_args()
 
-    with open(args.input, newline="", encoding="utf-8-sig") as f:
-        reader = csv.DictReader(f)
-        fieldnames = reader.fieldnames or []
-        cols = find_columns(fieldnames)
-        if not cols["cve"] and not cols["name"]:
-            sys.exit(f"Couldn't find a CVE or name column. Columns in your file: {fieldnames}")
-        all_rows = list(reader)
+    if args.limit < 1:
+        parser.error("--limit must be at least 1")
+    if args.hosts_per_group < 1:
+        parser.error("--hosts-per-group must be at least 1")
+
+    try:
+        fieldnames, all_rows = read_catalog(args.input)
+    except (OSError, UnicodeError, ValueError, csv.Error) as error:
+        parser.error(f"could not read input CSV: {error}")
+
+    cols = find_columns(fieldnames)
+    if not cols["cve"] and not cols["name"]:
+        parser.error("could not identify a CVE or vulnerability-name column. "
+                     f"Available columns: {', '.join(fieldnames)}")
 
     rows = all_rows
     if args.since_year:
-        rows = [r for r in rows if (cve_year(get(r, cols["cve"])) or 0) >= args.since_year]
+        rows = [row for row in rows if (cve_year(get(row, cols["cve"])) or 0) >= args.since_year]
     if args.min_severity:
         floor = SEVERITY_RANK[args.min_severity]
-        rows = [r for r in rows if SEVERITY_RANK[risk_for(r, cols).upper()] >= floor]
+        rows = [row for row in rows if SEVERITY_RANK[risk_for(row, cols).upper()] >= floor]
     if not rows:
-        sys.exit(f"No rows left after filtering (started with {len(all_rows)}). Loosen --since-year or --min-severity.")
+        parser.error(f"no rows remain after filtering (input contained {len(all_rows)} rows); "
+                     "check --since-year and --min-severity")
+
     if len(rows) > args.limit:
         rows = random.Random(args.seed).sample(rows, args.limit)
 
     is_kev = bool(cols["ransomware"])
-    has_product = bool(cols["product"])
-    product_host = {}
+    product_hosts = {}
     group_counter = defaultdict(int)
-    out = []
-    for i, row in enumerate(rows, start=1):
-        cve = get(row, cols["cve"])
-        desc = get(row, cols["description"])
-        name = get(row, cols["name"]) or short_title(cve, desc)
+    output_rows = []
 
+    for index, row in enumerate(rows, start=1):
+        cve = get(row, cols["cve"])
+        description = get(row, cols["description"])
+        name = get(row, cols["name"]) or short_title(cve, description)
         hint = ""
-        if has_product and (get(row, cols["product"]) or get(row, cols["vendor"])):
-            key = slug(get(row, cols["product"]) or get(row, cols["vendor"]))
-            if key not in product_host:
-                n = sum(1 for k in product_host if k == key) + 1
-                product_host[key] = f"{key}-{n:02d}"
-            host = product_host[key]
+
+        product = get(row, cols["product"])
+        vendor = get(row, cols["vendor"])
+        if product or vendor:
+            key = slug(" ".join(part for part in (vendor, product) if part))
+            if key not in product_hosts:
+                product_hosts[key] = f"{key}-01"
+            host = product_hosts[key]
         else:
             cwe = first_cwe(get(row, cols["cwe"]))
             group, prefixes, hint = group_for(cwe)
-            k = group_counter[group]
+            counter = group_counter[group]
             group_counter[group] += 1
-            host = f"{prefixes[k % len(prefixes)]}-{(k // len(prefixes)) % args.hosts_per_group + 1:02d}"
+            host = f"{prefixes[counter % len(prefixes)]}-{(counter // len(prefixes)) % args.hosts_per_group + 1:02d}"
             if cwe:
                 hint = f"{hint} (CWE-{cwe})."
             else:
                 hint = f"{hint}."
 
-        parts = [p for p in (desc, hint) if p]
+        synopsis_parts = [part for part in (description, hint) if part]
         if is_kev:
-            parts.append("Listed in the CISA Known Exploited Vulnerabilities catalog and actively exploited in the wild.")
-        out.append([10000 + i, cve, risk_for(row, cols), host, "tcp", 0, name, " ".join(parts)])
+            synopsis_parts.append("Listed in the CISA Known Exploited Vulnerabilities catalog.")
+        output_rows.append([
+            10000 + index, cve, risk_for(row, cols), host, "tcp", 0,
+            name, " ".join(synopsis_parts),
+        ])
 
-    with open(args.output, "w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow(["Plugin ID", "CVE", "Risk", "Host", "Protocol", "Port", "Name", "Synopsis"])
-        w.writerows(out)
-    print(f"Read {len(all_rows)} rows, wrote {len(out)} findings across {len({r[3] for r in out})} hosts to {args.output}")
+    try:
+        with open(args.output, "w", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(["Plugin ID", "CVE", "Risk", "Host", "Protocol", "Port", "Name", "Synopsis"])
+            writer.writerows(output_rows)
+    except OSError as error:
+        parser.error(f"could not write output CSV: {error}")
+
+    host_count = len({row[3] for row in output_rows})
+    print(f"Read {len(all_rows)} rows; wrote {len(output_rows)} findings across "
+          f"{host_count} synthetic hosts to {args.output}")
+    print("Output format: Nessus/OpenVAS CSV (compatible with Import & Export → Import CSV).")
+    print("Note: hosts are synthetic demo data, not evidence that these vulnerabilities affect your assets.")
 
 
 if __name__ == "__main__":
