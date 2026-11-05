@@ -317,7 +317,7 @@ async function renderDashboard() {
 // FINDINGS
 // ============================================================
 let findingsFilters = { severity: "", category: "", status: "", q: "" };
-let findingsCache = { findings: [], assetNames: {} };
+let findingsCache = { findings: [], assetNames: {}, hasMore: false };
 let findingsPage = 0;
 const FINDINGS_PAGE_SIZE = 100;
 
@@ -354,8 +354,9 @@ async function loadFindings() {
   const params = new URLSearchParams();
   ["severity", "category", "status"].forEach(k => { if (findingsFilters[k]) params.set(k, findingsFilters[k]); });
   try {
-    const [findings, assets] = await Promise.all([api("/api/findings?" + params.toString() + "&limit=" + FINDINGS_PAGE_SIZE + "&offset=" + (findingsPage * FINDINGS_PAGE_SIZE)), api("/api/assets")]);
-    findingsCache.findings = findings;
+    const [findings, assets] = await Promise.all([api("/api/findings?" + params.toString() + "&limit=" + (FINDINGS_PAGE_SIZE + 1) + "&offset=" + (findingsPage * FINDINGS_PAGE_SIZE)), api("/api/assets")]);
+    findingsCache.hasMore = findings.length > FINDINGS_PAGE_SIZE;
+    findingsCache.findings = findings.slice(0, FINDINGS_PAGE_SIZE);
     findingsCache.assetNames = Object.fromEntries(assets.map(a => [a.id, a.name]));
   } catch (e) {
     document.getElementById("findingsTable").innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`;
@@ -368,7 +369,7 @@ function bindFindingsPaging(host, count) {
   const prev = host.querySelector("#findingsPrev");
   const next = host.querySelector("#findingsNext");
   if (prev) prev.addEventListener("click", () => { if (findingsPage > 0) { findingsPage--; loadFindings(); } });
-  if (next) next.addEventListener("click", () => { if (count === FINDINGS_PAGE_SIZE) { findingsPage++; loadFindings(); } });
+  if (next) next.addEventListener("click", () => { if (findingsCache.hasMore) { findingsPage++; loadFindings(); } });
 }
 
 function drawFindingsTable() {
@@ -392,7 +393,7 @@ function drawFindingsTable() {
         <td class="r"><button class="link" data-open-finding="${f.id}">Open</button></td>
       </tr>`).join("")}</tbody></table>`;
   host.querySelectorAll("[data-open-finding]").forEach(b => b.addEventListener("click", () => openFindingDetail(b.dataset.openFinding)));
-  host.insertAdjacentHTML("beforeend", `<div class="row" style="justify-content:space-between;margin-top:12px"><button class="btn quiet" id="findingsPrev" ${findingsPage === 0 ? "disabled" : ""}>Previous</button><span class="muted">Page ${findingsPage + 1} · ${rows.length} shown</span><button class="btn quiet" id="findingsNext" ${rows.length < FINDINGS_PAGE_SIZE ? "disabled" : ""}>Next</button></div>`);
+  host.insertAdjacentHTML("beforeend", `<div class="row" style="justify-content:space-between;margin-top:12px"><button class="btn quiet" id="findingsPrev" ${findingsPage === 0 ? "disabled" : ""}>Previous</button><span class="muted">Page ${findingsPage + 1} · ${rows.length} shown</span><button class="btn quiet" id="findingsNext" ${!findingsCache.hasMore ? "disabled" : ""}>Next</button></div>`);
   bindFindingsPaging(host, rows.length);
 }
 
