@@ -34,7 +34,7 @@ def list_findings(
         q = q.filter(models.Finding.asset_id == asset_id)
     if assigned_to:
         q = q.filter(models.Finding.assigned_to == assigned_to)
-    return q.order_by(models.Finding.risk_score.desc(), models.Finding.created_at.desc()).offset(offset).limit(limit).all()
+    return q.order_by(models.Finding.risk_score.desc(), models.Finding.created_at.desc(), models.Finding.id.asc()).offset(offset).limit(limit).all()
 
 
 @router.post("", response_model=schemas.FindingOut, status_code=201)
