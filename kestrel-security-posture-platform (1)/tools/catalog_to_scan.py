@@ -90,14 +90,14 @@ def best_score(row, cols):
     for col in cols["cvss_all"]:
         raw = get(row, col)
         if raw and raw.lower() not in ("none", "null", "nan", "n/a", "na"):
-            match = re.search(r"(?<![0-9])(?:10(?:\.0)?|[0-9](?:\.\d+)?)(?![0-9])", raw)
-            if match:
-                try:
-                    score = float(match.group())
-                    if 0 <= score <= 10:
-                        return score
-                except ValueError:
-                    pass
+            # Only accept a plain numeric score. A CVSS vector contains
+            # version numbers (for example, CVSS:3.1) that are not scores.
+            try:
+                score = float(raw)
+                if 0 <= score <= 10:
+                    return score
+            except ValueError:
+                continue
     return None
 
 
