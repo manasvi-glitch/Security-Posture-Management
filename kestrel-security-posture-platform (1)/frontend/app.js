@@ -557,9 +557,8 @@ function openAssetForm() {
 async function processCatalogCsv(file, statusNode) {
   const batchSize = 2000;
   let header = null, row = [], field = "", inQuotes = false, quotePending = false;
-  let batch = [], imported = 0, skipped = 0, errors = 0, processed = 0;
-  let firstRow = true;
-  const norm = value => String(value || "").replace(/^\\uFEFF/, "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  let batch = [], imported = 0, skipped = 0, errors = 0, processed = 0, bytesRead = 0;
+  const norm = value => String(value || "").replace(/^\uFEFF/, "").toLowerCase().replace(/[^a-z0-9]/g, "");
   const headers = {};
   const get = (record, names) => {
     for (const name of names) {
@@ -569,7 +568,7 @@ async function processCatalogCsv(file, statusNode) {
     return "";
   };
   const categoryFor = (cwe, description) => {
-    const n = Number((String(cwe).match(/\\d+/) || [])[0]);
+    const n = Number((String(cwe).match(/\d+/) || [])[0]);
     const d = description.toLowerCase();
     if ([287,306,798,522,521,862,863,269,284,295,294,640,384,290].includes(n) || /authentication|password|credential|privilege escalation|access control|unauthori[sz]ed access/.test(d)) return "authentication";
     if ([79,89,352,22,434,918,94,78,611,601,502,77,917,98,74].includes(n) || /cross.site scripting|sql injection|web application|http request|command injection/.test(d)) return "application";
@@ -580,7 +579,7 @@ async function processCatalogCsv(file, statusNode) {
   };
   const parseRecord = async record => {
     if (!header) {
-      header = record.map(v => v.trim().replace(/^\\uFEFF/, ""));
+      header = record.map(v => v.trim().replace(/^\uFEFF/, ""));
       header.forEach((name, i) => headers[norm(name)] = i);
       const cveCol = ["cveid","cve","cveidentifier"].some(k => headers[k] !== undefined);
       const descCol = ["description","shortdescription","summary"].some(k => headers[k] !== undefined);
@@ -591,17 +590,17 @@ async function processCatalogCsv(file, statusNode) {
     processed++;
     const cve = get(record, ["CVE-ID","CVE ID","CVE"]);
     const description = get(record, ["DESCRIPTION","SHORT DESCRIPTION","SUMMARY"]);
-    if (!cve || !/^CVE-\\d{4}-\\d+$/i.test(cve) || !description) { errors++; return; }
+    if (!cve || !/^CVE-\d{4}-\d+$/i.test(cve) || !description) { errors++; return; }
     let score = null;
     for (const col of ["CVSS-V4","CVSS-V3","CVSS-V2","CVSS","CVSS Score","Base Score"]) {
       const raw = get(record, [col]);
-      if (/^(?:10(?:\\.0)?|[0-9](?:\\.\\d+)?)$/.test(raw)) { score = Number(raw); break; }
+      if (/^(?:10(?:\.0)?|[0-9](?:\.\d+)?)$/.test(raw)) { score = Number(raw); break; }
     }
     let severity = get(record, ["SEVERITY","CVSS Severity","Base Severity"]).toLowerCase();
     if (!["critical","high","medium","low"].includes(severity)) {
       severity = score !== null ? (score >= 9 ? "critical" : score >= 7 ? "high" : score >= 4 ? "medium" : "low") : "medium";
     }
-    const titleText = description.split(/(?<=[.!?])\\s/)[0].slice(0, 420);
+    const titleText = description.split(/(?<=[.!?])\s/)[0].slice(0, 420);
     batch.push({
       cve_id: cve,
       external_id: get(record, ["ID","Plugin ID"]) || cve,
@@ -620,11 +619,10 @@ async function processCatalogCsv(file, statusNode) {
     imported += result.findings_created || 0;
     skipped += result.findings_skipped || 0;
     errors += (result.errors || []).length;
-    statusNode.textContent = `Processed ${processed.toLocaleString()} rows · imported ${imported.toLocaleString()} · skipped ${skipped.toLocaleString()} · errors ${errors.toLocaleString()}`;
+    statusNode.textContent = "Processed " + processed.toLocaleString() + " rows · imported " + imported.toLocaleString() + " · skipped " + skipped.toLocaleString() + " · errors " + errors.toLocaleString();
   };
   const reader = file.stream().getReader();
   const decoder = new TextDecoder("utf-8");
-  let buffer = "";
   const consume = async chunk => {
     for (let i = 0; i < chunk.length; i++) {
       const ch = chunk[i];
@@ -632,7 +630,6 @@ async function processCatalogCsv(file, statusNode) {
         quotePending = false;
         if (ch === '"') { field += '"'; continue; }
         inQuotes = false;
-        // Process this character again outside the quoted field.
       }
       if (inQuotes) {
         if (ch === '"') quotePending = true;
@@ -641,10 +638,10 @@ async function processCatalogCsv(file, statusNode) {
         inQuotes = true;
       } else if (ch === ",") {
         row.push(field); field = "";
-      } else if (ch === "\\n") {
+      } else if (ch === "\n") {
         row.push(field); field = "";
         await parseRecord(row); row = [];
-      } else if (ch !== "\\r") {
+      } else if (ch !== "\r") {
         field += ch;
       }
     }
@@ -653,12 +650,12 @@ async function processCatalogCsv(file, statusNode) {
     while (true) {
       const {value, done} = await reader.read();
       if (done) break;
-      buffer = decoder.decode(value, {stream:true});
-      await consume(buffer);
-      statusNode.textContent = `Reading CSV… ${Math.min(99, Math.round((reader._bytesRead || 0) / file.size * 100))}% · ${processed.toLocaleString()} rows`;
+      bytesRead += value.byteLength;
+      await consume(decoder.decode(value, {stream:true}));
+      statusNode.textContent = "Reading CSV… " + Math.min(99, Math.round(bytesRead / file.size * 100)) + "% · " + processed.toLocaleString() + " rows";
     }
-    buffer = decoder.decode();
-    if (buffer) await consume(buffer);
+    const tail = decoder.decode();
+    if (tail) await consume(tail);
     if (quotePending) { quotePending = false; inQuotes = false; }
     if (field.length || row.length) { row.push(field); await parseRecord(row); }
     await sendBatch();
