@@ -317,7 +317,9 @@ async function renderDashboard() {
 // FINDINGS
 // ============================================================
 let findingsFilters = { severity: "", category: "", status: "", q: "" };
-let findingsCache = { findings: [], assetNames: {} };\nlet findingsPage = 0;\nconst FINDINGS_PAGE_SIZE = 100;
+let findingsCache = { findings: [], assetNames: {} };
+let findingsPage = 0;
+const FINDINGS_PAGE_SIZE = 100;
 
 async function renderFindings() {
   main().innerHTML = `<div class="fade">
@@ -362,7 +364,14 @@ async function loadFindings() {
   drawFindingsTable();
 }
 
-function bindFindingsPaging(host, count) {\n  const prev = host.querySelector("#findingsPrev");\n  const next = host.querySelector("#findingsNext");\n  if (prev) prev.addEventListener("click", () => { if (findingsPage > 0) { findingsPage--; loadFindings(); } });\n  if (next) next.addEventListener("click", () => { if (count === FINDINGS_PAGE_SIZE) { findingsPage++; loadFindings(); } });\n}\n\nfunction drawFindingsTable() {
+function bindFindingsPaging(host, count) {
+  const prev = host.querySelector("#findingsPrev");
+  const next = host.querySelector("#findingsNext");
+  if (prev) prev.addEventListener("click", () => { if (findingsPage > 0) { findingsPage--; loadFindings(); } });
+  if (next) next.addEventListener("click", () => { if (count === FINDINGS_PAGE_SIZE) { findingsPage++; loadFindings(); } });
+}
+
+function drawFindingsTable() {
   const host = document.getElementById("findingsTable");
   if (!host) return;
   const q = findingsFilters.q.trim().toLowerCase();
@@ -382,7 +391,9 @@ function bindFindingsPaging(host, count) {\n  const prev = host.querySelector("#
         <td class="muted num">${fmtAge(f.created_at)}</td>
         <td class="r"><button class="link" data-open-finding="${f.id}">Open</button></td>
       </tr>`).join("")}</tbody></table>`;
-  host.querySelectorAll("[data-open-finding]").forEach(b => b.addEventListener("click", () => openFindingDetail(b.dataset.openFinding)));\n  host.insertAdjacentHTML("beforeend", `<div class="row" style="justify-content:space-between;margin-top:12px"><button class="btn quiet" id="findingsPrev" ${findingsPage === 0 ? "disabled" : ""}>Previous</button><span class="muted">Page ${findingsPage + 1} · ${rows.length} shown</span><button class="btn quiet" id="findingsNext" ${rows.length < FINDINGS_PAGE_SIZE ? "disabled" : ""}>Next</button></div>`);\n  bindFindingsPaging(host, rows.length);
+  host.querySelectorAll("[data-open-finding]").forEach(b => b.addEventListener("click", () => openFindingDetail(b.dataset.openFinding)));
+  host.insertAdjacentHTML("beforeend", `<div class="row" style="justify-content:space-between;margin-top:12px"><button class="btn quiet" id="findingsPrev" ${findingsPage === 0 ? "disabled" : ""}>Previous</button><span class="muted">Page ${findingsPage + 1} · ${rows.length} shown</span><button class="btn quiet" id="findingsNext" ${rows.length < FINDINGS_PAGE_SIZE ? "disabled" : ""}>Next</button></div>`);
+  bindFindingsPaging(host, rows.length);
 }
 
 async function openFindingForm() {
@@ -727,7 +738,7 @@ function renderReports() {
     resultNode.textContent = "Checking CSV format…";
     try {
       const sample = await file.slice(0, 8192).text();
-      const header = (sample.split(/\\r?\\n/, 1)[0] || "").replace(/^\\uFEFF/, "").toLowerCase().replace(/[^a-z0-9,]/g, "");
+      const header = (sample.split(/\r?\n/, 1)[0] || "").replace(/^\uFEFF/, "").toLowerCase().replace(/[^a-z0-9,]/g, "");
       let result;
       if (header.includes("cveid") && header.includes("description")) {
         resultNode.textContent = "CVE/CWE catalog detected. Streaming and importing in batches…";
